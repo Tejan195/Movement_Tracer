@@ -1,5 +1,5 @@
 # Main application entry point
-from models.tracker import MovementTracker
+from src.models.tracker import MovementTracker
 import cv2
 from datetime import datetime
 
