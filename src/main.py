@@ -58,6 +58,10 @@ def main():
         stats += f"Skips: {tracker.skip_count} | Calories: {total_calories:.2f}"
         cv2.putText(frame, stats, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         
+        # Display detailed calories
+        cal_stats = f"Boxing: {boxing_calories:.2f} cal | Skipping: {skipping_calories:.2f} cal"
+        cv2.putText(frame, cal_stats, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        
         cv2.imshow('Movement Tracker', frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
