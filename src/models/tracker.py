@@ -9,24 +9,32 @@ class MovementTracker:
         self.pose = self.mp_pose.Pose(min_detection_confidence=0.7, min_tracking_confidence=0.7)
         self.mp_drawing = mp.solutions.drawing_utils
         self.punch_count = 0
-        self.last_punch_time = datetime.now()
-        self.punch_speed = 0
-        self.punch_cooldown = 0.5  # Cooldown in seconds between punch detections
-        self.punch_in_progress = False
+        self.last_punch_time = {"left": datetime.now(), "right": datetime.now()}
+        self.punch_speed = {"left": 0, "right": 0}
+        self.punch_cooldown = 0.4  # seconds
+        self.punch_in_progress = {"left": False, "right": False}
         self.prev_wrist_positions = {"left": [], "right": []}
-        self.min_punch_distance = 0.15  # Minimum distance for a punch to be counted
-        self.boxing_calories_per_punch = 0.1  # Calories burned per punch
+        self.min_punch_distance = 0.12
+        self.boxing_calories_per_punch = 0.1
         self.total_boxing_calories = 0
+
+    def calculate_angle(self, a, b, c):
+        a = np.array([a.x, a.y, a.z])
+        b = np.array([b.x, b.y, b.z])
+        c = np.array([c.x, c.y, c.z])
+        ba = a - b
+        bc = c - b
+        cosine_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc) + 1e-6)
+        angle = np.arccos(np.clip(cosine_angle, -1.0, 1.0))
+        return np.degrees(angle)
 
     def calculate_calories(self, weight, duration_mins):
         met_value = 7.5  # MET value for boxing
         base_calories = met_value * weight * (duration_mins / 60)
-        # Combine time-based and punch-based calories
         return (base_calories * 0.7) + self.total_boxing_calories
 
     def detect_punch(self, landmarks):
         current_time = datetime.now()
-        time_diff = (current_time - self.last_punch_time).total_seconds()
         punch_detected = False
         for side in ["left", "right"]:
             if side == "left":
@@ -39,56 +47,58 @@ class MovementTracker:
                 elbow = landmarks[self.mp_pose.PoseLandmark.RIGHT_ELBOW.value]
 
             # Store wrist position for velocity calculation
-            self.prev_wrist_positions[side].append((wrist.x, wrist.y, current_time))
+            self.prev_wrist_positions[side].append((wrist.x, wrist.y, wrist.z, current_time))
             if len(self.prev_wrist_positions[side]) > 10:
                 self.prev_wrist_positions[side].pop(0)
 
-            # Calculate punch velocity using multiple frames
+            # Calculate velocity and acceleration
             if len(self.prev_wrist_positions[side]) >= 5:
                 old_pos = self.prev_wrist_positions[side][0]
                 new_pos = self.prev_wrist_positions[side][-1]
-                time_delta = (new_pos[2] - old_pos[2]).total_seconds()
+                time_delta = (new_pos[3] - old_pos[3]).total_seconds()
                 if time_delta > 0:
-                    distance_x = new_pos[0] - old_pos[0]
-                    distance_y = new_pos[1] - old_pos[1]
-                    distance = np.sqrt(distance_x**2 + distance_y**2)
-                    self.punch_speed = distance / time_delta
-                    # Check if the movement is forward (away from shoulder)
-                    wrist_to_shoulder_x = wrist.x - shoulder.x
-                    if side == "right":
-                        direction_forward = (wrist_to_shoulder_x < -0.2)
-                    else:
-                        direction_forward = (wrist_to_shoulder_x > 0.2)
+                    dx = new_pos[0] - old_pos[0]
+                    dy = new_pos[1] - old_pos[1]
+                    dz = new_pos[2] - old_pos[2]
+                    distance = np.sqrt(dx**2 + dy**2 + dz**2)
+                    velocity = distance / time_delta
+                    self.punch_speed[side] = velocity
                 else:
-                    direction_forward = False
+                    velocity = 0
             else:
-                direction_forward = False
+                velocity = 0
 
-            # Arm extension check
-            shoulder_to_elbow = np.sqrt((elbow.x - shoulder.x)**2 + (elbow.y - shoulder.y)**2)
-            elbow_to_wrist = np.sqrt((wrist.x - elbow.x)**2 + (wrist.y - elbow.y)**2)
-            shoulder_to_wrist = np.sqrt((wrist.x - shoulder.x)**2 + (wrist.y - shoulder.y)**2)
-            arm_extended = shoulder_to_wrist > 0.9 * (shoulder_to_elbow + elbow_to_wrist)
+            # Angle analysis
+            elbow_angle = self.calculate_angle(shoulder, elbow, wrist)
+            arm_extended = elbow_angle > 155  # nearly straight
 
-            # Calculate distance moved for this potential punch
+            # Forward movement (z-axis for depth)
+            wrist_to_shoulder_z = wrist.z - shoulder.z
+            if side == "right":
+                direction_forward = wrist_to_shoulder_z < -0.08
+            else:
+                direction_forward = wrist_to_shoulder_z < -0.08
+
+            # Distance moved
             if len(self.prev_wrist_positions[side]) >= 2:
                 start_pos = self.prev_wrist_positions[side][0]
                 end_pos = self.prev_wrist_positions[side][-1]
-                punch_distance = np.sqrt((end_pos[0] - start_pos[0])**2 + (end_pos[1] - start_pos[1])**2)
+                punch_distance = np.sqrt((end_pos[0] - start_pos[0])**2 + (end_pos[1] - start_pos[1])**2 + (end_pos[2] - start_pos[2])**2)
             else:
                 punch_distance = 0
 
-            # Detect punch based on multiple criteria
+            # Temporal filtering and cooldown
+            time_diff = (current_time - self.last_punch_time[side]).total_seconds()
             if time_diff > self.punch_cooldown:
-                if (self.punch_speed > 1.0 and arm_extended and direction_forward and punch_distance > self.min_punch_distance and not self.punch_in_progress):
+                if (velocity > 1.0 and arm_extended and direction_forward and punch_distance > self.min_punch_distance and not self.punch_in_progress[side]):
                     self.punch_count += 1
-                    self.last_punch_time = current_time
-                    self.punch_in_progress = True
-                    punch_intensity = min(2.0, self.punch_speed) / 2.0
+                    self.last_punch_time[side] = current_time
+                    self.punch_in_progress[side] = True
+                    punch_intensity = min(2.0, velocity) / 2.0
                     calories_for_this_punch = self.boxing_calories_per_punch * (1.0 + punch_intensity)
                     self.total_boxing_calories += calories_for_this_punch
                     punch_detected = True
             # Reset punch_in_progress when arm is retracted
-            if not arm_extended and self.punch_in_progress:
-                self.punch_in_progress = False
+            if not arm_extended and self.punch_in_progress[side]:
+                self.punch_in_progress[side] = False
         return punch_detected
